@@ -1,6 +1,51 @@
 import Foundation
 import AudioToolbox
 
+private func streamingPropertyListener(
+    _ userData: UnsafeMutableRawPointer,
+    _ stream: AudioFileStreamID,
+    _ propertyID: AudioFileStreamPropertyID,
+    _ flags: UnsafeMutablePointer<AudioFileStreamPropertyFlags>
+) {
+    let player = Unmanaged<StreamingAudioPlayer>.fromOpaque(userData).takeUnretainedValue()
+    if propertyID == kAudioFileStreamProperty_DataFormat {
+        player.setupQueue(for: stream)
+    }
+}
+
+private func streamingPacketsCallback(
+    _ userData: UnsafeMutableRawPointer,
+    _ numberBytes: UInt32,
+    _ numberPackets: UInt32,
+    _ inputData: UnsafeRawPointer,
+    _ packetDescriptions: UnsafeMutablePointer<AudioStreamPacketDescription>?
+) {
+    let player = Unmanaged<StreamingAudioPlayer>.fromOpaque(userData).takeUnretainedValue()
+    player.enqueue(
+        bytes: inputData,
+        byteCount: numberBytes,
+        packetCount: numberPackets,
+        descriptions: packetDescriptions
+    )
+}
+
+private func streamingQueueCallback(
+    _ userData: UnsafeMutableRawPointer?,
+    _ queue: AudioQueueRef,
+    _ buffer: AudioQueueBufferRef
+) {
+    guard let userData else { return }
+    let player = Unmanaged<StreamingAudioPlayer>.fromOpaque(userData).takeUnretainedValue()
+    player.lock.lock()
+    player.buffers.remove(UnsafeMutableRawPointer(buffer))
+    let shouldFinish = player.finished && player.buffers.isEmpty
+    player.lock.unlock()
+    AudioQueueFreeBuffer(queue, buffer)
+    if shouldFinish {
+        player.finish()
+    }
+}
+
 final class StreamingAudioPlayer {
     private var stream: AudioFileStreamID?
     private var queue: AudioQueueRef?
@@ -17,8 +62,8 @@ final class StreamingAudioPlayer {
         var streamRef: AudioFileStreamID?
         let status = AudioFileStreamOpen(
             Unmanaged.passUnretained(self).toOpaque(),
-            Self.propertyListener,
-            Self.packetsCallback,
+            streamingPropertyListener,
+            streamingPacketsCallback,
             kAudioFileMP3Type,
             &streamRef
         )
@@ -131,7 +176,7 @@ final class StreamingAudioPlayer {
         var newQueue: AudioQueueRef?
         let queueStatus = AudioQueueNewOutput(
             &format,
-            Self.queueCallback,
+            streamingQueueCallback,
             Unmanaged.passUnretained(self).toOpaque(),
             nil,
             nil,
@@ -152,7 +197,7 @@ final class StreamingAudioPlayer {
         bytes: UnsafeRawPointer,
         byteCount: UInt32,
         packetCount: UInt32,
-        descriptions: UnsafePointer<AudioStreamPacketDescription>?
+        descriptions: UnsafeMutablePointer<AudioStreamPacketDescription>?
     ) {
         guard let queue else { return }
 
@@ -178,7 +223,7 @@ final class StreamingAudioPlayer {
         if let descriptions,
            let destination = buffer.pointee.mPacketDescriptions {
             buffer.pointee.mPacketDescriptionCount = packetCount
-            destination.assign(from: descriptions, count: Int(packetCount))
+            destination.update(from: descriptions, count: Int(packetCount))
         }
 
         lock.lock()
