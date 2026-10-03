@@ -1,0 +1,35 @@
+name: Build ElevenSpeak
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-intel:
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Assemble app bundle
+        run: |
+          APP="ElevenSpeak.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp .build/release/ElevenSpeak "$APP/Contents/MacOS/ElevenSpeak"
+          cp Resources/Info.plist "$APP/Contents/Info.plist"
+          chmod +x "$APP/Contents/MacOS/ElevenSpeak"
+          file "$APP/Contents/MacOS/ElevenSpeak"
+
+      - name: Package
+        run: ditto -c -k --sequesterRsrc --keepParent ElevenSpeak.app ElevenSpeak-macOS-Intel.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElevenSpeak-macOS-Intel
+          path: ElevenSpeak-macOS-Intel.zip
