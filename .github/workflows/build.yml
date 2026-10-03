@@ -13,8 +13,8 @@ jobs:
       - name: Build Intel app
         run: |
           swift build -c release --arch x86_64
-          APP="ElevenSpeak.app"
-          rm -rf "$APP"
+          APP="dist/ElevenSpeak.app"
+          rm -rf dist
           mkdir -p "$APP/Contents/MacOS"
           cp ".build/release/ElevenSpeak" "$APP/Contents/MacOS/ElevenSpeak"
           cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -34,5 +34,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ElevenSpeak-Intel
-          path: ElevenSpeak.app
+          path: dist
           retention-days: 30
