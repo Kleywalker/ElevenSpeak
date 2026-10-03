@@ -14,10 +14,12 @@ final class AppModel: ObservableObject {
     @Published var launchAtLogin = UserDefaults.standard.object(forKey: "launchAtLogin") as? Bool ?? true
     @Published var hotKeyName = UserDefaults.standard.string(forKey: "hotKeyName") ?? GlobalHotKey.presets[0].displayName
     @Published var accessibilityTrusted = false
+    @Published var streamingEnabled = UserDefaults.standard.object(forKey: "streamingEnabled") as? Bool ?? true
 
     private let eleven = ElevenLabsClient()
     private let textSource = SelectedTextService()
     private let player = AudioPlayer()
+    private let streamingPlayer = StreamingAudioPlayer()
     private let hotKey = GlobalHotKey()
 
     init() {
@@ -41,7 +43,9 @@ final class AppModel: ObservableObject {
 
     func saveAPIKey() {
         KeychainStore.save(apiKey)
-        Task { @MainActor in await refreshVoices() }
+        Task { @MainActor in
+            await refreshVoices()
+        }
     }
 
     func refreshVoices() async {
@@ -87,22 +91,41 @@ final class AppModel: ObservableObject {
             }
 
             isSpeaking = true
-            status = "Generating…"
+            status = streamingEnabled ? "Generating and streaming…" : "Generating…"
 
             do {
-                let audio = try await eleven.synthesize(
-                    text: text,
-                    voiceID: voice.id,
-                    speed: speed,
-                    apiKey: apiKey
-                )
-                try player.play(data: audio) { [weak self] in
-                    Task { @MainActor in
-                        self?.isSpeaking = false
-                        self?.status = "Ready"
+                if streamingEnabled {
+                    let request = try eleven.streamRequest(
+                        text: text,
+                        voiceID: voice.id,
+                        speed: speed,
+                        apiKey: apiKey
+                    )
+
+                    try await streamingPlayer.start(request: request) { [weak self] in
+                        Task { @MainActor in
+                            self?.isSpeaking = false
+                            self?.status = "Ready"
+                        }
+                    }
+                } else {
+                    let audio = try await eleven.synthesize(
+                        text: text,
+                        voiceID: voice.id,
+                        speed: speed,
+                        apiKey: apiKey
+                    )
+                    try player.play(data: audio) { [weak self] in
+                        Task { @MainActor in
+                            self?.isSpeaking = false
+                            self?.status = "Ready"
+                        }
                     }
                 }
-                status = "Speaking"
+
+                if isSpeaking {
+                    status = streamingEnabled ? "Speaking (streaming)" : "Speaking"
+                }
             } catch {
                 isSpeaking = false
                 status = error.localizedDescription
@@ -111,6 +134,7 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        streamingPlayer.stop()
         player.stop()
         isSpeaking = false
         status = "Stopped"
@@ -119,6 +143,11 @@ final class AppModel: ObservableObject {
     func setSpeed(_ value: Double) {
         speed = value
         UserDefaults.standard.set(value, forKey: "speed")
+    }
+
+    func setStreaming(_ enabled: Bool) {
+        streamingEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "streamingEnabled")
     }
 
     func preview(_ voice: ElevenVoice) {
@@ -130,8 +159,10 @@ final class AppModel: ObservableObject {
         status = "Playing preview…"
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
             guard let data else { return }
-            try? self?.player.play(data: data) { [weak self] in
-                Task { @MainActor in self?.status = "Ready" }
+            Task { @MainActor in
+                try? self?.player.play(data: data) { [weak self] in
+                    Task { @MainActor in self?.status = "Ready" }
+                }
             }
         }.resume()
     }
@@ -155,6 +186,7 @@ final class AppModel: ObservableObject {
             } else {
                 try SMAppService.mainApp.unregister()
             }
+
             if reportStatus {
                 status = enabled ? "Launch at login enabled" : "Launch at login disabled"
             }
@@ -165,7 +197,7 @@ final class AppModel: ObservableObject {
 
     func requestAccessibility() {
         textSource.requestAccessibilityPermission()
-        accessibilityTrusted = textSource.hasAccessibilityPermission
+        refreshAccessibilityStatus()
         status = accessibilityTrusted
             ? "Accessibility access is enabled"
             : "Allow ElevenSpeak in System Settings → Privacy & Security → Accessibility"
