@@ -49,9 +49,9 @@ private func streamingQueueCallback(
 final class StreamingAudioPlayer {
     private var stream: AudioFileStreamID?
     private var queue: AudioQueueRef?
-    private var buffers = Set<UnsafeMutableRawPointer>()
-    private let lock = NSLock()
-    private var finished = false
+    fileprivate var buffers = Set<UnsafeMutableRawPointer>()
+    fileprivate let lock = NSLock()
+    fileprivate var finished = false
     private var started = false
     private var completion: (() -> Void)?
 
@@ -152,7 +152,7 @@ final class StreamingAudioPlayer {
         }
     }
 
-    private func setupQueue(for stream: AudioFileStreamID) {
+    fileprivate func setupQueue(for stream: AudioFileStreamID) {
         lock.lock()
         if queue != nil {
             lock.unlock()
@@ -193,7 +193,7 @@ final class StreamingAudioPlayer {
         lock.unlock()
     }
 
-    private func enqueue(
+    fileprivate func enqueue(
         bytes: UnsafeRawPointer,
         byteCount: UInt32,
         packetCount: UInt32,
@@ -257,7 +257,7 @@ final class StreamingAudioPlayer {
         }
     }
 
-    private func finish() {
+    fileprivate func finish() {
         lock.lock()
         let callback = completion
         completion = nil
