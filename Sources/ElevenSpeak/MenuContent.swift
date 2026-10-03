@@ -97,6 +97,14 @@ struct SettingsView: View {
             }
 
             Toggle(
+                "Stream audio while generating",
+                isOn: Binding(
+                    get: { app.streamingEnabled },
+                    set: { app.setStreaming($0) }
+                )
+            )
+
+            Toggle(
                 "Launch ElevenSpeak at login",
                 isOn: Binding(
                     get: { app.launchAtLogin },
