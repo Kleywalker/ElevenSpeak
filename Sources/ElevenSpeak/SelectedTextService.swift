@@ -1,6 +1,86 @@
 import AppKit
 import ApplicationServices
-final class SelectedTextService{
- func selectedText()async->String?{let sys=AXUIElementCreateSystemWide();var focused:CFTypeRef?;if AXUIElementCopyAttributeValue(sys,kAXFocusedUIElementAttribute as CFString,&focused)==.success,let focused=focused{var selected:CFTypeRef?;if AXUIElementCopyAttributeValue(focused as!AXUIElement,kAXSelectedTextAttribute as CFString,&selected)==.success,let text=selected as?String,!text.isEmpty{return text}};return copySelectionFallback()}
- private func copySelectionFallback()->String?{let pb=NSPasteboard.general;let saved=pb.pasteboardItems?.map{$0.types.compactMap{type->(NSPasteboard.PasteboardType,Data)? in $0.data(forType:type).map{(type,$0)}}} ?? [];let src=CGEventSource(stateID:.hidSystemState);let d=CGEvent(keyboardEventSource:src,virtualKey:8,keyDown:true);let u=CGEvent(keyboardEventSource:src,virtualKey:8,keyDown:false);d?.flags=.maskCommand;u?.flags=.maskCommand;d?.post(tap:.cghidEventTap);u?.post(tap:.cghidEventTap);Thread.sleep(forTimeInterval:0.08);let text=pb.string(forType:.string);pb.clearContents();for item in saved{let restored=NSPasteboardItem();for(type,data)in item{restored.setData(data,forType:type)};pb.writeObjects([restored])};return text}
+
+final class SelectedTextService {
+    func selectedText() async -> String? {
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        let focusedResult = AXUIElementCopyAttributeValue(
+            system,
+            kAXFocusedUIElementAttribute as CFString,
+            &focused
+        )
+
+        if focusedResult == .success, let focused,
+           CFGetTypeID(focused) == AXUIElementGetTypeID() {
+            let element = focused as! AXUIElement
+            var selected: CFTypeRef?
+            let selectedResult = AXUIElementCopyAttributeValue(
+                element,
+                kAXSelectedTextAttribute as CFString,
+                &selected
+            )
+            if selectedResult == .success,
+               let text = selected as? String,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return text
+            }
+        }
+
+        return copySelectionFallback()
+    }
+
+    var hasAccessibilityPermission: Bool {
+        AXIsProcessTrusted()
+    }
+
+    func requestAccessibilityPermission() {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        let options = [key: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
+
+    private func copySelectionFallback() -> String? {
+        let pasteboard = NSPasteboard.general
+        let savedItems = pasteboard.pasteboardItems ?? []
+        let savedData: [[(NSPasteboard.PasteboardType, Data)]] = savedItems.map { item in
+            item.types.compactMap { type in
+                guard let data = item.data(forType: type) else { return nil }
+                return (type, data)
+            }
+        }
+
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let keyDown = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: 8,
+            keyDown: true
+        ),
+        let keyUp = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: 8,
+            keyDown: false
+        ) else {
+            return nil
+        }
+
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+
+        Thread.sleep(forTimeInterval: 0.08)
+        let text = pasteboard.string(forType: .string)
+
+        pasteboard.clearContents()
+        for itemData in savedData {
+            let item = NSPasteboardItem()
+            for (type, data) in itemData {
+                item.setData(data, forType: type)
+            }
+            pasteboard.writeObjects([item])
+        }
+
+        return text
+    }
 }
