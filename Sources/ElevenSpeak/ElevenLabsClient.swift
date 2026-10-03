@@ -1,7 +1,7 @@
 import Foundation
 struct ElevenVoice:Codable,Identifiable,Hashable{let voice_id:String;let name:String;let description:String?;let preview_url:String?;var id:String{voice_id};var previewURL:URL?{preview_url.flatMap(URL.init)}}
 private struct VoicesResponse:Codable{let voices:[ElevenVoice]}
-enum ElevenLabsError:LocalizedError{case badResponse,api(String);var errorDescription:String?{switch self{case .badResponse:return"Unexpected ElevenLabs response.";case .api(let m):return"ElevenLabs: \\(m)"}}}
+enum ElevenLabsError:LocalizedError{case badResponse,api(String);var errorDescription:String?{switch self{case .badResponse:return"Unexpected ElevenLabs response.";case .api(let m):return "ElevenLabs: \(m)"}}}
 final class ElevenLabsClient{
  private let base=URL(string:"https://api.elevenlabs.io")!
  func listVoices(apiKey:String)async throws->[ElevenVoice]{var r=URLRequest(url:base.appendingPathComponent("v1/voices"));r.setValue(apiKey,forHTTPHeaderField:"xi-api-key");let(d,res)=try await URLSession.shared.data(for:r);try validate(res,d);return try JSONDecoder().decode(VoicesResponse.self,from:d).voices}
