@@ -1,35 +1,39 @@
 name: Build ElevenSpeak
-
 on:
   workflow_dispatch:
   push:
     branches: [main]
-
+permissions:
+  contents: read
 jobs:
   build-intel:
-    runs-on: macos-15-intel
+    runs-on: macos-26-intel
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build
-        run: swift build -c release
-
-      - name: Assemble app bundle
+      - uses: actions/checkout@v4
+      - name: Build Intel app
         run: |
+          swift build -c release --arch x86_64
           APP="ElevenSpeak.app"
           rm -rf "$APP"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp .build/release/ElevenSpeak "$APP/Contents/MacOS/ElevenSpeak"
-          cp Resources/Info.plist "$APP/Contents/Info.plist"
-          chmod +x "$APP/Contents/MacOS/ElevenSpeak"
-          file "$APP/Contents/MacOS/ElevenSpeak"
-
-      - name: Package
-        run: ditto -c -k --sequesterRsrc --keepParent ElevenSpeak.app ElevenSpeak-macOS-Intel.zip
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          mkdir -p "$APP/Contents/MacOS"
+          cp ".build/release/ElevenSpeak" "$APP/Contents/MacOS/ElevenSpeak"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleDisplayName</key><string>ElevenSpeak</string>
+          <key>CFBundleExecutable</key><string>ElevenSpeak</string>
+          <key>CFBundleIdentifier</key><string>com.kleywalker.ElevenSpeak</string>
+          <key>CFBundleName</key><string>ElevenSpeak</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>LSMinimumSystemVersion</key><string>13.0</string>
+          <key>LSUIElement</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "ElevenSpeak-Intel.zip"
+      - uses: actions/upload-artifact@v4
         with:
-          name: ElevenSpeak-macOS-Intel
-          path: ElevenSpeak-macOS-Intel.zip
+          name: ElevenSpeak-Intel
+          path: ElevenSpeak-Intel.zip
+          retention-days: 30

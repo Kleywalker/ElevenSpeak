@@ -1,0 +1,6 @@
+import AppKit
+import ApplicationServices
+final class SelectedTextService{
+ func selectedText()async->String?{let sys=AXUIElementCreateSystemWide();var focused:CFTypeRef?;if AXUIElementCopyAttributeValue(sys,kAXFocusedUIElementAttribute as CFString,&focused)==.success,let focused=focused{var selected:CFTypeRef?;if AXUIElementCopyAttributeValue(focused as!AXUIElement,kAXSelectedTextAttribute as CFString,&selected)==.success,let text=selected as?String,!text.isEmpty{return text}};return copySelectionFallback()}
+ private func copySelectionFallback()->String?{let pb=NSPasteboard.general;let saved=pb.pasteboardItems?.map{$0.types.compactMap{type->(NSPasteboard.PasteboardType,Data)? in $0.data(forType:type).map{(type,$0)}}} ?? [];let src=CGEventSource(stateID:.hidSystemState);let d=CGEvent(keyboardEventSource:src,virtualKey:8,keyDown:true);let u=CGEvent(keyboardEventSource:src,virtualKey:8,keyDown:false);d?.flags=.maskCommand;u?.flags=.maskCommand;d?.post(tap:.cghidEventTap);u?.post(tap:.cghidEventTap);Thread.sleep(forTimeInterval:0.08);let text=pb.string(forType:.string);pb.clearContents();for item in saved{let restored=NSPasteboardItem();for(type,data)in item{restored.setData(data,forType:type)};pb.writeObjects([restored])};return text}
+}
