@@ -1,25 +1,17 @@
 import Foundation
 import AudioToolbox
+import os
 
-private func streamingPropertyListener(
-    _ userData: UnsafeMutableRawPointer,
-    _ stream: AudioFileStreamID,
-    _ propertyID: AudioFileStreamPropertyID,
-    _ flags: UnsafeMutablePointer<AudioFileStreamPropertyFlags>
-) {
+private let streamingPropertyListener: AudioFileStream_PropertyListenerProc = {
+    userData, stream, propertyID, _ in
     let player = Unmanaged<StreamingAudioPlayer>.fromOpaque(userData).takeUnretainedValue()
     if propertyID == kAudioFileStreamProperty_DataFormat {
         player.setupQueue(for: stream)
     }
 }
 
-private func streamingPacketsCallback(
-    _ userData: UnsafeMutableRawPointer,
-    _ numberBytes: UInt32,
-    _ numberPackets: UInt32,
-    _ inputData: UnsafeRawPointer,
-    _ packetDescriptions: UnsafeMutablePointer<AudioStreamPacketDescription>?
-) {
+private let streamingPacketsCallback: AudioFileStream_PacketsProc = {
+    userData, numberBytes, numberPackets, inputData, packetDescriptions in
     let player = Unmanaged<StreamingAudioPlayer>.fromOpaque(userData).takeUnretainedValue()
     player.enqueue(
         bytes: inputData,
@@ -29,18 +21,18 @@ private func streamingPacketsCallback(
     )
 }
 
-private func streamingQueueCallback(
-    _ userData: UnsafeMutableRawPointer?,
-    _ queue: AudioQueueRef,
-    _ buffer: AudioQueueBufferRef
-) {
+private let streamingQueueCallback: AudioQueueOutputCallback = {
+    userData, queue, buffer in
     guard let userData else { return }
     let player = Unmanaged<StreamingAudioPlayer>.fromOpaque(userData).takeUnretainedValue()
-    player.lock.lock()
-    player.buffers.remove(UnsafeMutableRawPointer(buffer))
-    let shouldFinish = player.finished && player.buffers.isEmpty
-    player.lock.unlock()
+
+    let shouldFinish = player.lock.withLock {
+        player.buffers.remove(UnsafeMutableRawPointer(buffer))
+        return player.finished && player.buffers.isEmpty
+    }
+
     AudioQueueFreeBuffer(queue, buffer)
+
     if shouldFinish {
         player.finish()
     }
@@ -50,7 +42,7 @@ final class StreamingAudioPlayer {
     private var stream: AudioFileStreamID?
     private var queue: AudioQueueRef?
     fileprivate var buffers = Set<UnsafeMutableRawPointer>()
-    fileprivate let lock = NSLock()
+    fileprivate let lock = OSAllocatedUnfairLock()
     fileprivate var finished = false
     private var started = false
     private var completion: (() -> Void)?
@@ -67,6 +59,7 @@ final class StreamingAudioPlayer {
             kAudioFileMP3Type,
             &streamRef
         )
+
         guard status == noErr, let streamRef else {
             throw NSError(
                 domain: "ElevenSpeak",
@@ -74,10 +67,12 @@ final class StreamingAudioPlayer {
                 userInfo: [NSLocalizedDescriptionKey: "Could not open MP3 stream."]
             )
         }
+
         stream = streamRef
 
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
+
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else {
                 throw NSError(
@@ -102,10 +97,10 @@ final class StreamingAudioPlayer {
                 parse(chunk)
             }
 
-            lock.lock()
-            finished = true
-            let shouldFinish = started && buffers.isEmpty
-            lock.unlock()
+            let shouldFinish = lock.withLock {
+                finished = true
+                return started && buffers.isEmpty
+            }
 
             if shouldFinish {
                 finish()
@@ -117,21 +112,22 @@ final class StreamingAudioPlayer {
     }
 
     func stop() {
-        lock.lock()
-        let queueRef = queue
-        let streamRef = stream
-        queue = nil
-        stream = nil
-        buffers.removeAll()
-        finished = false
-        started = false
-        lock.unlock()
+        let resources = lock.withLock {
+            let resources = (queue, stream)
+            queue = nil
+            stream = nil
+            buffers.removeAll()
+            finished = false
+            started = false
+            return resources
+        }
 
-        if let queueRef {
+        if let queueRef = resources.0 {
             AudioQueueStop(queueRef, true)
             AudioQueueDispose(queueRef, true)
         }
-        if let streamRef {
+
+        if let streamRef = resources.1 {
             AudioFileStreamClose(streamRef)
         }
 
@@ -153,44 +149,38 @@ final class StreamingAudioPlayer {
     }
 
     fileprivate func setupQueue(for stream: AudioFileStreamID) {
-        lock.lock()
-        if queue != nil {
-            lock.unlock()
-            return
+        lock.withLock {
+            if queue != nil {
+                return
+            }
+
+            var format = AudioStreamBasicDescription()
+            var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+
+            guard AudioFileStreamGetProperty(
+                stream,
+                kAudioFileStreamProperty_DataFormat,
+                &size,
+                &format
+            ) == noErr else {
+                return
+            }
+
+            var newQueue: AudioQueueRef?
+            guard AudioQueueNewOutput(
+                &format,
+                streamingQueueCallback,
+                Unmanaged.passUnretained(self).toOpaque(),
+                nil,
+                nil,
+                0,
+                &newQueue
+            ) == noErr else {
+                return
+            }
+
+            queue = newQueue
         }
-
-        var format = AudioStreamBasicDescription()
-        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        let status = AudioFileStreamGetProperty(
-            stream,
-            kAudioFileStreamProperty_DataFormat,
-            &size,
-            &format
-        )
-
-        guard status == noErr else {
-            lock.unlock()
-            return
-        }
-
-        var newQueue: AudioQueueRef?
-        let queueStatus = AudioQueueNewOutput(
-            &format,
-            streamingQueueCallback,
-            Unmanaged.passUnretained(self).toOpaque(),
-            nil,
-            nil,
-            0,
-            &newQueue
-        )
-
-        guard queueStatus == noErr, let newQueue else {
-            lock.unlock()
-            return
-        }
-
-        queue = newQueue
-        lock.unlock()
     }
 
     fileprivate func enqueue(
@@ -202,20 +192,20 @@ final class StreamingAudioPlayer {
         guard let queue else { return }
 
         var buffer: AudioQueueBufferRef?
-        let allocationStatus: OSStatus
+        let status: OSStatus
 
         if descriptions != nil {
-            allocationStatus = AudioQueueAllocateBufferWithPacketDescriptions(
+            status = AudioQueueAllocateBufferWithPacketDescriptions(
                 queue,
                 byteCount,
                 packetCount,
                 &buffer
             )
         } else {
-            allocationStatus = AudioQueueAllocateBuffer(queue, byteCount, &buffer)
+            status = AudioQueueAllocateBuffer(queue, byteCount, &buffer)
         }
 
-        guard allocationStatus == noErr, let buffer else { return }
+        guard status == noErr, let buffer else { return }
 
         buffer.pointee.mAudioDataByteSize = byteCount
         memcpy(buffer.pointee.mAudioData, bytes, Int(byteCount))
@@ -226,28 +216,27 @@ final class StreamingAudioPlayer {
             destination.update(from: descriptions, count: Int(packetCount))
         }
 
-        lock.lock()
-        buffers.insert(UnsafeMutableRawPointer(buffer))
-        let shouldStart = !started
-        started = true
-        lock.unlock()
+        let shouldStart = lock.withLock {
+            buffers.insert(UnsafeMutableRawPointer(buffer))
+            let shouldStart = !started
+            started = true
+            return shouldStart
+        }
 
         let count = descriptions == nil ? 0 : packetCount
         let descriptionPointer = descriptions == nil
             ? nil
             : buffer.pointee.mPacketDescriptions
 
-        let enqueueStatus = AudioQueueEnqueueBuffer(
+        guard AudioQueueEnqueueBuffer(
             queue,
             buffer,
             count,
             descriptionPointer
-        )
-
-        guard enqueueStatus == noErr else {
-            lock.lock()
-            buffers.remove(UnsafeMutableRawPointer(buffer))
-            lock.unlock()
+        ) == noErr else {
+            lock.withLock {
+                buffers.remove(UnsafeMutableRawPointer(buffer))
+            }
             AudioQueueFreeBuffer(queue, buffer)
             return
         }
@@ -258,68 +247,11 @@ final class StreamingAudioPlayer {
     }
 
     fileprivate func finish() {
-        lock.lock()
-        let callback = completion
-        completion = nil
-        lock.unlock()
+        let callback = lock.withLock {
+            let callback = completion
+            completion = nil
+            return callback
+        }
         callback?()
-    }
-
-    private static func propertyListener(
-        _ userData: UnsafeMutableRawPointer?,
-        _ stream: AudioFileStreamID,
-        _ propertyID: AudioFileStreamPropertyID,
-        _ flags: UnsafeMutablePointer<UInt32>
-    ) {
-        guard let userData else { return }
-        let player = Unmanaged<StreamingAudioPlayer>
-            .fromOpaque(userData)
-            .takeUnretainedValue()
-
-        if propertyID == kAudioFileStreamProperty_DataFormat {
-            player.setupQueue(for: stream)
-        }
-    }
-
-    private static func packetsCallback(
-        _ userData: UnsafeMutableRawPointer?,
-        _ numberBytes: UInt32,
-        _ numberPackets: UInt32,
-        _ inputData: UnsafeRawPointer,
-        _ packetDescriptions: UnsafePointer<AudioStreamPacketDescription>?
-    ) {
-        guard let userData else { return }
-        let player = Unmanaged<StreamingAudioPlayer>
-            .fromOpaque(userData)
-            .takeUnretainedValue()
-
-        player.enqueue(
-            bytes: inputData,
-            byteCount: numberBytes,
-            packetCount: numberPackets,
-            descriptions: packetDescriptions
-        )
-    }
-
-    private static func queueCallback(
-        _ userData: UnsafeMutableRawPointer?,
-        _ queue: AudioQueueRef,
-        _ buffer: AudioQueueBufferRef
-    ) {
-        guard let userData else { return }
-        let player = Unmanaged<StreamingAudioPlayer>
-            .fromOpaque(userData)
-            .takeUnretainedValue()
-
-        player.lock.lock()
-        player.buffers.remove(UnsafeMutableRawPointer(buffer))
-        let shouldFinish = player.finished && player.buffers.isEmpty
-        player.lock.unlock()
-
-        AudioQueueFreeBuffer(queue, buffer)
-
-        if shouldFinish {
-            player.finish()
-        }
     }
 }
